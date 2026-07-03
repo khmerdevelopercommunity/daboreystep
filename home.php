@@ -95,7 +95,7 @@ $stmt->close();
         label { font-size: 13px; color: #94a3b8; display: block; margin-top: 10px; }
         input { width: 100%; padding: 10px; margin: 6px 0 14px 0; box-sizing: border-box; border: 1px solid #475569; border-radius: 4px; background: #0f172a; color: #fff; }
         
-        .dropzone-area { border: 2px dashed #475569; background: #0f172a; border-radius: 6px; padding: 20px; text-align: center; cursor: pointer; color: #94a3b8; transition: border-color 0.2s; }
+        .dropzone-area { border: 2px dashed #475569; background: #0f172a; border-radius: 6px; padding: 20px; text-align: center; cursor: pointer; color: #94a3b8; transition: border-color 0.2s; position: relative; }
         .dropzone-area:hover, .dropzone-area.dragover { border-color: #38bdf8; color: #f8fafc; }
         .dropzone-area input { display: none; }
 
@@ -223,17 +223,25 @@ $stmt->close();
     </div>
 
     <script>
-    let qrEngineInstance = null;
+    let camEngineInstance = null;
+    let fileEngineInstance = null;
+
     const fileInput = document.getElementById('qr-file-input');
     const dropZone = document.getElementById('drop-zone');
 
-    // 1. ENGINE FOR WEBCAM SCANNING
+    // INITIALIZE FILE DECODER ATTACHED TO A STABLE VISIBLE DIV
+    function initScannerEngines() {
+        fileEngineInstance = new Html5Qrcode("drop-zone");
+        startSyncClock();
+    }
+
+    // 1. WEBCAM SCANNING FUNCTIONALITY
     function activateWebcamScanner() {
         document.getElementById('start-cam-btn').disabled = true;
         document.getElementById('stop-cam-btn').disabled = false;
-        qrEngineInstance = new Html5Qrcode("scanner-viewport");
+        camEngineInstance = new Html5Qrcode("scanner-viewport");
         
-        qrEngineInstance.start(
+        camEngineInstance.start(
             { facingMode: "user" }, { fps: 15, qrbox: 180 },
             (decodedText) => { handleDecodedText(decodedText); }, () => {}
         ).catch(() => { alert("Camera access denied."); killWebcamScanner(); });
@@ -242,16 +250,17 @@ $stmt->close();
     function killWebcamScanner() {
         document.getElementById('start-cam-btn').disabled = false;
         document.getElementById('stop-cam-btn').disabled = true;
-        if (qrEngineInstance) {
-            qrEngineInstance.stop().then(() => { document.getElementById('scanner-viewport').innerHTML = ""; });
+        if (camEngineInstance) {
+            camEngineInstance.stop().then(() => { document.getElementById('scanner-viewport').innerHTML = ""; camEngineInstance = null; });
         }
     }
 
-    // 2. ENGINE FOR FILE UPLOAD SCANNING
+    // 2. FILE UPLOAD ACTIONS
     ['dragenter', 'dragover'].forEach(name => dropZone.addEventListener(name, (e) => { e.preventDefault(); dropZone.classList.add('dragover'); }));
     ['dragleave', 'drop'].forEach(name => dropZone.addEventListener(name, (e) => { e.preventDefault(); dropZone.classList.remove('dragover'); }));
     
     dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
         if (e.dataTransfer.files.length) { processUploadedFile(e.dataTransfer.files[0]); }
     });
     fileInput.addEventListener('change', (e) => {
@@ -259,29 +268,54 @@ $stmt->close();
     });
 
     function processUploadedFile(file) {
-        // FIXED INITIALIZATION BUG: Uses hidden, static element form container instead of interactive UI wrapper
-        const engine = new Html5Qrcode("qr-submit-form");
-        engine.scanFile(file, true)
+        if (!fileEngineInstance) {
+            alert("Scanner engine not ready. Refreshing context.");
+            return;
+        }
+        fileEngineInstance.scanFile(file, true)
             .then(decodedText => { handleDecodedText(decodedText); })
-            .catch(() => { alert("Failed to read image. Ensure the QR code is clearly visible."); });
+            .catch((err) => { 
+                console.error(err);
+                alert("Failed to parse image element. Is the image clear?"); 
+            });
     }
 
-    // SHARED RECOGNITION DATA PARSER
+    // 100% BULLETPROOF STRING-SPLIT PARSER
     function handleDecodedText(text) {
-        if (text.startsWith('otpauth://')) {
+        // Lowercase everything temporarily to avoid case sensitivity breaking checks
+        let lowerText = text.toLowerCase();
+        
+        if (lowerText.includes('otpauth://') && lowerText.includes('secret=')) {
             try {
                 killWebcamScanner();
-                let parsed = OTPAuth.URI.parse(text);
-                document.getElementById('final-name').value = (parsed.issuer ? parsed.issuer + ":" : "") + parsed.label;
-                document.getElementById('final-seed').value = parsed.secret.base32;
+
+                // 1. Manually slice out the secret key string securely via simple splits
+                let parts = text.split(/[?&]secret=/i);
+                if (parts.length < 2) throw new Error("Missing secret");
+                
+                let secretPart = parts[1].split('&')[0];
+
+                // 2. Manually slice out the label/account name path string safely
+                let labelPart = "2FA Token";
+                if (lowerText.includes('totp/')) {
+                    let labelExtract = text.split(/totp\//i)[1].split('?')[0];
+                    labelPart = decodeURIComponent(labelExtract);
+                }
+
+                // 3. Inject attributes into input nodes and process submission
+                document.getElementById('final-name').value = labelPart;
+                document.getElementById('final-seed').value = secretPart.toUpperCase().replace(/\s+/g, '');
                 document.getElementById('qr-submit-form').submit();
-            } catch (err) { alert("Error parsing QR structural metrics."); }
+            } catch (err) { 
+                console.error(err);
+                alert("Processing failed.\nCaptured Data:\n" + text); 
+            }
         } else {
-            alert("This QR code is not a valid Google 2FA configuration format.");
+            alert("Invalid 2FA Configuration Layout. Text detected:\n" + text);
         }
     }
 
-    // 3. SECURE DELETION INTERACTION TRIGGER
+    // 3. REMOVAL INTERACTIONS
     function triggerTokenDeletion(id, serviceName) {
         if (confirm("Are you sure you want to permanently delete the 2FA key for '" + serviceName + "'? You will lose access to generating codes for this entry.")) {
             document.getElementById('delete-target-id').value = id;
@@ -289,7 +323,7 @@ $stmt->close();
         }
     }
 
-    // LIVE TOTP DISPLAY RUNTIME HANDLERS
+    // LIVE RUNTIME TOTP MATRIX LOGIC
     function calculateLiveWebTokens() {
         document.querySelectorAll('[id^="code-"]').forEach(el => {
             const seed = el.getAttribute('data-seed');
@@ -322,7 +356,7 @@ $stmt->close();
         });
     }
 
-    window.addEventListener('DOMContentLoaded', startSyncClock);
+    window.addEventListener('DOMContentLoaded', initScannerEngines);
     </script>
 </body>
 </html>
