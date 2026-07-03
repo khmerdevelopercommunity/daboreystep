@@ -20,6 +20,31 @@ $encryption_key = 'YourSuperSecretEncryptionKeyGoesHere';
 $message = "";
 $status = "";
 
+// HANDLE DELETING A 2FA TOKEN ELEMENT
+if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['action'] === 'delete_2fa') {
+    if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $_SESSION['csrf_token']) {
+        die("Security token validation failed.");
+    }
+
+    $token_id = intval($_POST['token_id']);
+
+    if ($token_id > 0) {
+        // Enforce ownership parity checking by chaining user_id to the query parameter array
+        $stmt = $conn->prepare("DELETE FROM two_factor_tokens WHERE id = ? AND user_id = ?");
+        $stmt->bind_param("ii", $token_id, $_SESSION['user_id']);
+        
+        if ($stmt->execute()) {
+            log_system_event($conn, $_SESSION['username'], '2FA_TOKEN_DELETED_ID_' . $token_id);
+            $message = "2FA entry detached and purged successfully.";
+            $status = "success";
+        } else {
+            $message = "Failed to purge structural data record.";
+            $status = "error";
+        }
+        $stmt->close();
+    }
+}
+
 // HANDLE REGISTERING AN EXTRACTED OR MANUALLY ENTERED 2FA SEED
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['action'] === 'add_2fa') {
     if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $_SESSION['csrf_token']) {
@@ -56,7 +81,7 @@ $stmt->close();
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>DaboreyPass - 2FA Scanner Hub</title>
+    <title>DaboreyPass - 2FA Control Console</title>
     <style>
         body { font-family: 'Segoe UI', Arial, sans-serif; background-color: #0f172a; color: #f8fafc; margin: 0; padding: 20px; }
         .container { max-width: 1100px; margin: 0 auto; }
@@ -71,7 +96,6 @@ $stmt->close();
         label { font-size: 13px; color: #94a3b8; display: block; margin-top: 10px; }
         input { width: 100%; padding: 10px; margin: 6px 0 14px 0; box-sizing: border-box; border: 1px solid #475569; border-radius: 4px; background: #0f172a; color: #fff; }
         
-        /* Interactive Elements styling */
         .dropzone-area { border: 2px dashed #475569; background: #0f172a; border-radius: 6px; padding: 20px; text-align: center; cursor: pointer; color: #94a3b8; transition: border-color 0.2s; }
         .dropzone-area:hover, .dropzone-area.dragover { border-color: #38bdf8; color: #f8fafc; }
         .dropzone-area input { display: none; }
@@ -90,8 +114,12 @@ $stmt->close();
         .token-row { background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 15px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
         .token-label { font-size: 12px; color: #94a3b8; text-transform: uppercase; font-weight: bold; }
         .token-code { font-size: 32px; color: #38bdf8; font-family: monospace; font-weight: bold; letter-spacing: 2px; margin-top: 4px; }
-        .copy-btn { background: #334155; color: white; border: none; padding: 8px 14px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; }
+        
+        .action-tray { display: flex; flex-direction: column; gap: 8px; }
+        .copy-btn { background: #334155; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; min-width: 70px; }
         .copy-btn:hover { background: #475569; }
+        .del-btn { background: rgba(239, 68, 68, 0.1); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.2); padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold; }
+        .del-btn:hover { background: #ef4444; color: white; }
 
         .progress-wrapper { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; background: rgba(56, 189, 248, 0.05); padding: 10px; border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.1); font-size: 13px;}
         .bar-container { background: #334155; height: 6px; width: 120px; border-radius: 3px; overflow: hidden; }
@@ -157,6 +185,12 @@ $stmt->close();
                     <input type="hidden" id="final-name" name="service_name">
                     <input type="hidden" id="final-seed" name="secret_seed">
                 </form>
+
+                <form method="POST" action="" id="delete-token-form">
+                    <input type="hidden" name="action" value="delete_2fa">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token']; ?>">
+                    <input type="hidden" id="delete-target-id" name="token_id">
+                </form>
             </div>
 
             <div class="box">
@@ -177,7 +211,10 @@ $stmt->close();
                                     <div class="token-label"><?php echo htmlspecialchars($token['service_name']); ?></div>
                                     <div class="token-code" id="code-<?php echo $token['id']; ?>" data-seed="<?php echo htmlspecialchars($token['decrypted_seed']); ?>">000 000</div>
                                 </div>
-                                <button class="copy-btn" onclick="copyTokenValue('code-<?php echo $token['id']; ?>', this)">Copy</button>
+                                <div class="action-tray">
+                                    <button class="copy-btn" onclick="copyTokenValue('code-<?php echo $token['id']; ?>', this)">Copy</button>
+                                    <button class="del-btn" onclick="triggerTokenDeletion(<?php echo $token['id']; ?>, '<?php echo htmlspecialchars(addslashes($token['service_name'])); ?>')">Delete</button>
+                                </div>
                             </div>
                         <?php endforeach; ?>
                     <?php endif; ?>
@@ -241,6 +278,14 @@ $stmt->close();
             } catch (err) { alert("Error parsing QR structural metrics."); }
         } else {
             alert("This QR code is not a valid Google 2FA configuration format.");
+        }
+    }
+
+    // 3. SECURE DELETION INTERACTION TRIGGER
+    function triggerTokenDeletion(id, serviceName) {
+        if (confirm("Are you sure you want to permanently delete the 2FA key for '" + serviceName + "'? You will lose access to generating codes for this entry.")) {
+            document.getElementById('delete-target-id').value = id;
+            document.getElementById('delete-token-form').submit();
         }
     }
 
