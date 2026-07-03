@@ -29,7 +29,6 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['a
     $token_id = intval($_POST['token_id']);
 
     if ($token_id > 0) {
-        // Enforce ownership parity checking by chaining user_id to the query parameter array
         $stmt = $conn->prepare("DELETE FROM two_factor_tokens WHERE id = ? AND user_id = ?");
         $stmt->bind_param("ii", $token_id, $_SESSION['user_id']);
         
@@ -260,7 +259,8 @@ $stmt->close();
     });
 
     function processUploadedFile(file) {
-        const engine = new Html5Qrcode("drop-zone");
+        // FIXED INITIALIZATION BUG: Uses hidden, static element form container instead of interactive UI wrapper
+        const engine = new Html5Qrcode("qr-submit-form");
         engine.scanFile(file, true)
             .then(decodedText => { handleDecodedText(decodedText); })
             .catch(() => { alert("Failed to read image. Ensure the QR code is clearly visible."); });
