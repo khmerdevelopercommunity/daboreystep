@@ -1,7 +1,8 @@
--- Target Live Production Database Configuration
+-- 1. Initialize the Live Production Database Container
+CREATE DATABASE IF NOT EXISTS `if0_42283348_daboreypass`;
 USE `if0_42283348_daboreypass`;
 
--- 1. Create Core Users Infrastructure Table
+-- 2. Create Core Users Infrastructure Table
 CREATE TABLE IF NOT EXISTS `users` (
     `id` INT AUTO_INCREMENT PRIMARY KEY,
     `username` VARCHAR(50) NOT NULL UNIQUE,
@@ -11,7 +12,7 @@ CREATE TABLE IF NOT EXISTS `users` (
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 2. Create Audit and Security Logging System Table
+-- 3. Create Audit and Security Logging System Table
 CREATE TABLE IF NOT EXISTS `audit_logs` (
     `id` INT AUTO_INCREMENT PRIMARY KEY,
     `username` VARCHAR(50) NOT NULL,
@@ -20,7 +21,7 @@ CREATE TABLE IF NOT EXISTS `audit_logs` (
     `logged_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 3. Create Authenticator 2FA Secure Key Vault Table
+-- 4. Create Authenticator 2FA Secure Key Vault Table
 CREATE TABLE IF NOT EXISTS `two_factor_tokens` (
     `id` INT AUTO_INCREMENT PRIMARY KEY,
     `user_id` INT NOT NULL,
