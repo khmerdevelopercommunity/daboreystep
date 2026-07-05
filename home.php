@@ -20,7 +20,136 @@ $encryption_key = 'YourSuperSecretEncryptionKeyGoesHere';
 $message = "";
 $status = "";
 
-// HANDLE DELETING A 2FA TOKEN ELEMENT
+// FETCH ACTIVE SECURE TOKENS FROM THE DATABASE
+function fetchUserTokens($conn, $userId, $encKey) {
+    $stmt = $conn->prepare("SELECT id, service_name, AES_DECRYPT(secret_seed, ?) AS decrypted_seed FROM two_factor_tokens WHERE user_id = ?");
+    $stmt->bind_param("si", $encKey, $userId);
+    $stmt->execute();
+    $result = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+    return $result;
+}
+
+// ACTION: UNIVERSAL JSON EXPORT
+if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['action'] === 'export_backup') {
+    if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $_SESSION['csrf_token']) {
+        die("Security token validation failed.");
+    }
+    
+    $tokens = fetchUserTokens($conn, $_SESSION['user_id'], $encryption_key);
+    
+    log_system_event($conn, $_SESSION['username'], '2FA_UNIVERSAL_JSON_EXPORTED');
+    
+    $exportData = [];
+    foreach ($tokens as $t) {
+        if (!empty($t['decrypted_seed'])) {
+            $exportData[] = [
+                'name'   => $t['service_name'],
+                'secret' => strtoupper($t['decrypted_seed'])
+            ];
+        }
+    }
+    
+    header('Content-Type: application/json; charset=utf-8');
+    header('Content-Disposition: attachment; filename="Vault_Backup_' . date('Ymd_His') . '.json"');
+    
+    echo json_encode($exportData, JSON_PRETTY_PRINT);
+    exit;
+}
+
+// ACTION: UNIVERSAL MULTI-CONDITION PLUG-AND-PLAY IMPORT ENGINE
+if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['action'] === 'import_backup') {
+    if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $_SESSION['csrf_token']) {
+        die("Security token validation failed.");
+    }
+
+    if (isset($_FILES['backup_file']) && $_FILES['backup_file']['error'] === UPLOAD_ERR_OK) {
+        $fileContent = file_get_contents($_FILES['backup_file']['tmp_name']);
+        $payload = json_decode($fileContent, true);
+        
+        if (is_array($payload)) {
+            $items = $payload;
+            
+            // Auto-unwrap if nested inside a root property dictionary node (like entries, items, or data)
+            if (!isset($payload[0])) { 
+                foreach ($payload as $key => $value) {
+                    if (is_array($value)) {
+                        $items = $value;
+                        break;
+                    }
+                }
+            }
+
+            $success_count = 0;
+            $stmt = $conn->prepare("INSERT INTO two_factor_tokens (user_id, service_name, secret_seed) VALUES (?, ?, AES_ENCRYPT(?, ?))");
+            
+            foreach ($items as $item) {
+                if (!is_array($item)) continue;
+
+                // Force all array keys to lowercase to eliminate case-sensitivity mismatches
+                $cleanItem = array_change_key_case($item, CASE_LOWER);
+
+                // Extract Account Name / Issuer
+                $name = trim($cleanItem['name'] ?? $cleanItem['label'] ?? $cleanItem['issuer'] ?? $cleanItem['originalname'] ?? $cleanItem['issuername'] ?? 'Imported Account');
+                
+                // The 5-Stage Condition Fallback System
+                $seed = '';
+
+                // CONDITION 1: Standard Universal/Aegis flat format
+                if (isset($cleanItem['secret']) && !empty($cleanItem['secret'])) {
+                    $seed = trim($cleanItem['secret']);
+                } 
+                // CONDITION 2: Alternative terminology variant
+                elseif (isset($cleanItem['seed']) && !empty($cleanItem['seed'])) {
+                    $seed = trim($cleanItem['seed']);
+                } elseif (isset($cleanItem['key']) && !empty($cleanItem['key'])) {
+                    $seed = trim($cleanItem['key']);
+                } 
+                // CONDITION 3: Hardware Key / LastPass format
+                elseif (isset($cleanItem['secretname']) && !empty($cleanItem['secretname'])) {
+                    $seed = trim($cleanItem['secretname']);
+                } 
+                // CONDITION 4: Deep Nested Object format (2FAS / Bitwarden layout style)
+                elseif (isset($cleanItem['totp']['secret']) && !empty($cleanItem['totp']['secret'])) {
+                    $seed = trim($cleanItem['totp']['secret']);
+                } 
+                // CONDITION 5: Raw URL scheme validation extraction fallback (otpauth://)
+                elseif (isset($cleanItem['uri']) && !empty($cleanItem['uri'])) {
+                    parse_str(parse_url($cleanItem['uri'], PHP_URL_QUERY), $queryOpts);
+                    $seed = $queryOpts['secret'] ?? '';
+                }
+
+                // Clean the extracted seed (force uppercase, strip bad characters)
+                $seed = strtoupper(preg_replace('/[^A-Za-z2-7]/', '', $seed));
+                
+                if (!empty($name) && !empty($seed)) {
+                    $stmt->bind_param("isss", $_SESSION['user_id'], $name, $seed, $encryption_key);
+                    if ($stmt->execute()) {
+                        $success_count++;
+                    }
+                }
+            }
+            $stmt->close();
+            
+            if ($success_count > 0) {
+                log_system_event($conn, $_SESSION['username'], '2FA_UNIVERSAL_JSON_IMPORTED_COUNT_' . $success_count);
+                $message = "Migration Complete! Successfully loaded " . $success_count . " profiles into your vault.";
+                $status = "success";
+            } else {
+                $message = "Could not parse any valid name/secret data pairs out of this file structure.";
+                $status = "error";
+            }
+        } else {
+            $message = "Invalid JSON data framework structure syntax.";
+            $status = "error";
+        }
+    } else {
+        $message = "File upload failure. Check properties and retry.";
+        $status = "error";
+    }
+}
+
+// ACTION: DELETING A 2FA TOKEN ELEMENT
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['action'] === 'delete_2fa') {
     if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $_SESSION['csrf_token']) {
         die("Security token validation failed.");
@@ -44,7 +173,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['a
     }
 }
 
-// HANDLE REGISTERING AN EXTRACTED OR MANUALLY ENTERED 2FA SEED
+// ACTION: REGISTERING AN EXTRACTED OR MANUALLY ENTERED 2FA SEED
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['action'] === 'add_2fa') {
     if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $_SESSION['csrf_token']) {
         die("Security token validation failed.");
@@ -69,12 +198,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['a
     }
 }
 
-// FETCH ACTIVE SECURE TOKENS FROM THE SEPARATE TABLE
-$stmt = $conn->prepare("SELECT id, service_name, AES_DECRYPT(secret_seed, ?) AS decrypted_seed FROM two_factor_tokens WHERE user_id = ?");
-$stmt->bind_param("si", $encryption_key, $_SESSION['user_id']);
-$stmt->execute();
-$two_factor_tokens = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-$stmt->close();
+$two_factor_tokens = fetchUserTokens($conn, $_SESSION['user_id'], $encryption_key);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -99,13 +223,19 @@ $stmt->close();
         .dropzone-area:hover, .dropzone-area.dragover { border-color: #38bdf8; color: #f8fafc; }
         .dropzone-area input { display: none; }
 
-        #scanner-viewport { width: 100%; min-height: 200px; background: #0f172a; border-radius: 6px; border: 1px solid #475569; overflow: hidden; margin-bottom: 15px; }
-        .cam-controls { display: flex; gap: 10px; margin-bottom: 15px; }
-        .cam-btn { background: #0284c7; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 13px; width: 50%; }
+        .viewport-box { width: 100%; min-height: 200px; background: #0f172a; border-radius: 6px; border: 1px solid #475569; overflow: hidden; margin-bottom: 15px; margin-top: 5px; }
+        .cam-segment { background: rgba(15, 23, 42, 0.4); padding: 15px; border-radius: 6px; border: 1px solid #334155; margin-bottom: 20px; }
+        .cam-btn { background: #0284c7; color: white; border: none; padding: 8px 14px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 12px; }
         .cam-btn.stop { background: #ef4444; }
         
         .submit-btn { width: 100%; padding: 12px; background: #10b981; border: none; color: white; border-radius: 4px; cursor: pointer; font-weight: bold; }
         .submit-btn:hover { background: #059669; }
+
+        .backup-tray { display: flex; flex-direction: column; gap: 15px; border-top: 2px dashed #334155; padding-top: 20px; margin-top: 25px; }
+        .btn-backup { background: #4f46e5; border: none; color: white; font-weight: bold; padding: 12px; border-radius: 4px; cursor: pointer; width: 100%; font-size: 14px; text-align: center; display: block; text-decoration: none;}
+        .btn-backup:hover { background: #4338ca; }
+        .import-box-area { background: #0f172a; border: 1px dashed #475569; border-radius: 6px; padding: 15px; text-align: center; cursor: pointer; color: #94a3b8; font-size: 13px; }
+        .import-box-area:hover { border-color: #a855f7; color: #fff; }
 
         .error { color: #f87171; background: rgba(248,113,113,0.1); border: 1px solid rgba(248,113,113,0.2); padding: 10px; font-size: 14px; border-radius: 4px; margin-bottom: 15px; }
         .success { color: #34d399; background: rgba(52,211,153,0.1); border: 1px solid rgba(52,211,153,0.2); padding: 10px; font-size: 14px; border-radius: 4px; margin-bottom: 15px; }
@@ -145,12 +275,28 @@ $stmt->close();
         <div class="grid-layout">
             <div>
                 <div class="box">
-                    <h3>Option 1: Scan with Webcam</h3>
-                    <div class="cam-controls">
-                        <button type="button" class="cam-btn" id="start-cam-btn" onclick="activateWebcamScanner()">Open Camera</button>
-                        <button type="button" class="cam-btn stop" id="stop-cam-btn" onclick="killWebcamScanner()" disabled>Close Camera</button>
+                    <h3>Option 1: Scan via Live Viewport</h3>
+                    <div class="cam-segment">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <span style="font-size:14px; font-weight:bold; color:#f8fafc;">📷 Option 1A: Back Camera (Rear Lens)</span>
+                            <div>
+                                <button type="button" class="cam-btn" id="start-env-btn" onclick="startCameraEngine('env')">Open</button>
+                                <button type="button" class="cam-btn stop" id="stop-env-btn" onclick="stopCameraEngine('env')" disabled>Close</button>
+                            </div>
+                        </div>
+                        <div id="env-viewport" class="viewport-box"></div>
                     </div>
-                    <div id="scanner-viewport"></div>
+
+                    <div class="cam-segment" style="margin-bottom: 0;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <span style="font-size:14px; font-weight:bold; color:#f8fafc;">🤳 Option 1B: Front Camera (Selfie Lens)</span>
+                            <div>
+                                <button type="button" class="cam-btn" id="start-usr-btn" onclick="startCameraEngine('usr')">Open</button>
+                                <button type="button" class="cam-btn stop" id="stop-usr-btn" onclick="stopCameraEngine('usr')" disabled>Close</button>
+                            </div>
+                        </div>
+                        <div id="usr-viewport" class="viewport-box"></div>
+                    </div>
                 </div>
 
                 <div class="box">
@@ -169,7 +315,7 @@ $stmt->close();
                         <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token']; ?>">
                         
                         <label>Account Name / Issuer</label>
-                        <input type="text" name="service_name" placeholder="e.g. Google:me@gmail.com, GitHub" required autocomplete="off">
+                        <input type="text" name="service_name" placeholder="e.g. Google:me@gmail.com" required autocomplete="off">
                         
                         <label>Your Secret Key (Base32 String)</label>
                         <input type="text" name="secret_seed" placeholder="e.g. JBSWY3DPEHPK3PXP" required autocomplete="off">
@@ -218,44 +364,89 @@ $stmt->close();
                         <?php endforeach; ?>
                     <?php endif; ?>
                 </div>
+
+                <div class="backup-tray">
+                    <h4 style="margin: 0; color: #a855f7; border-bottom: 1px solid #334155; padding-bottom: 6px;">🔄 Cross-Platform Data Migration</h4>
+                    
+                    <form method="POST" action="">
+                        <input type="hidden" name="action" value="export_backup">
+                        <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token']; ?>">
+                        <button type="submit" class="btn-backup">Export Backup</button>
+                    </form>
+
+                    <form method="POST" action="" enctype="multipart/form-data" id="import-form">
+                        <input type="hidden" name="action" value="import_backup">
+                        <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token']; ?>">
+                        <div class="import-box-area" onclick="document.getElementById('import-file-input').click()">
+                            <span>Import Backup</span>
+                            <input type="file" id="import-file-input" name="backup_file" accept=".json" style="display:none;" onchange="document.getElementById('import-form').submit();">
+                        </div>
+                    </form>
+                </div>
             </div>
         </div>
     </div>
 
     <script>
-    let camEngineInstance = null;
+    let envCamInstance = null;
+    let usrCamInstance = null;
     let fileEngineInstance = null;
 
     const fileInput = document.getElementById('qr-file-input');
     const dropZone = document.getElementById('drop-zone');
 
-    // INITIALIZE FILE DECODER ATTACHED TO A STABLE VISIBLE DIV
     function initScannerEngines() {
         fileEngineInstance = new Html5Qrcode("drop-zone");
         startSyncClock();
     }
 
-    // 1. WEBCAM SCANNING FUNCTIONALITY
-    function activateWebcamScanner() {
-        document.getElementById('start-cam-btn').disabled = true;
-        document.getElementById('stop-cam-btn').disabled = false;
-        camEngineInstance = new Html5Qrcode("scanner-viewport");
-        
-        camEngineInstance.start(
-            { facingMode: "user" }, { fps: 15, qrbox: 180 },
-            (decodedText) => { handleDecodedText(decodedText); }, () => {}
-        ).catch(() => { alert("Camera access denied."); killWebcamScanner(); });
-    }
-
-    function killWebcamScanner() {
-        document.getElementById('start-cam-btn').disabled = false;
-        document.getElementById('stop-cam-btn').disabled = true;
-        if (camEngineInstance) {
-            camEngineInstance.stop().then(() => { document.getElementById('scanner-viewport').innerHTML = ""; camEngineInstance = null; });
+    function startCameraEngine(type) {
+        if (type === 'env') {
+            document.getElementById('start-env-btn').disabled = true;
+            document.getElementById('stop-env-btn').disabled = false;
+            envCamInstance = new Html5Qrcode("env-viewport");
+            envCamInstance.start(
+                { facingMode: "environment" }, { fps: 15, qrbox: 180 },
+                (decodedText) => { handleDecodedText(decodedText, 'env'); }, () => {}
+            ).catch(() => { alert("Back camera failed."); stopCameraEngine('env'); });
+        } else {
+            document.getElementById('start-usr-btn').disabled = true;
+            document.getElementById('stop-usr-btn').disabled = false;
+            usrCamInstance = new Html5Qrcode("usr-viewport");
+            usrCamInstance.start(
+                { facingMode: "user" }, { fps: 15, qrbox: 180 },
+                (decodedText) => { handleDecodedText(decodedText, 'usr'); }, () => {}
+            ).catch(() => { alert("Front camera failed."); stopCameraEngine('usr'); });
         }
     }
 
-    // 2. FILE UPLOAD ACTIONS
+    function stopCameraEngine(type) {
+        if (type === 'env') {
+            document.getElementById('start-env-btn').disabled = false;
+            document.getElementById('stop-env-btn').disabled = true;
+            if (envCamInstance) {
+                envCamInstance.stop().then(() => { 
+                    document.getElementById('env-viewport').innerHTML = ""; 
+                    envCamInstance = null; 
+                });
+            }
+        } else {
+            document.getElementById('start-usr-btn').disabled = false;
+            document.getElementById('stop-usr-btn').disabled = true;
+            if (usrCamInstance) {
+                usrCamInstance.stop().then(() => { 
+                    document.getElementById('usr-viewport').innerHTML = ""; 
+                    usrCamInstance = null; 
+                });
+            }
+        }
+    }
+
+    function killAllActiveCameras() {
+        stopCameraEngine('env');
+        stopCameraEngine('usr');
+    }
+
     ['dragenter', 'dragover'].forEach(name => dropZone.addEventListener(name, (e) => { e.preventDefault(); dropZone.classList.add('dragover'); }));
     ['dragleave', 'drop'].forEach(name => dropZone.addEventListener(name, (e) => { e.preventDefault(); dropZone.classList.remove('dragover'); }));
     
@@ -268,62 +459,40 @@ $stmt->close();
     });
 
     function processUploadedFile(file) {
-        if (!fileEngineInstance) {
-            alert("Scanner engine not ready. Refreshing context.");
-            return;
-        }
+        if (!fileEngineInstance) return;
         fileEngineInstance.scanFile(file, true)
-            .then(decodedText => { handleDecodedText(decodedText); })
-            .catch((err) => { 
-                console.error(err);
-                alert("Failed to parse image element. Is the image clear?"); 
-            });
+            .then(decodedText => { handleDecodedText(decodedText, 'file'); })
+            .catch(() => { alert("Failed to parse image."); });
     }
 
-    // 100% BULLETPROOF STRING-SPLIT PARSER
-    function handleDecodedText(text) {
-        // Lowercase everything temporarily to avoid case sensitivity breaking checks
+    function handleDecodedText(text, triggerSource) {
         let lowerText = text.toLowerCase();
-        
         if (lowerText.includes('otpauth://') && lowerText.includes('secret=')) {
             try {
-                killWebcamScanner();
-
-                // 1. Manually slice out the secret key string securely via simple splits
+                killAllActiveCameras();
                 let parts = text.split(/[?&]secret=/i);
-                if (parts.length < 2) throw new Error("Missing secret");
-                
                 let secretPart = parts[1].split('&')[0];
-
-                // 2. Manually slice out the label/account name path string safely
                 let labelPart = "2FA Token";
                 if (lowerText.includes('totp/')) {
                     let labelExtract = text.split(/totp\//i)[1].split('?')[0];
                     labelPart = decodeURIComponent(labelExtract);
                 }
-
-                // 3. Inject attributes into input nodes and process submission
                 document.getElementById('final-name').value = labelPart;
                 document.getElementById('final-seed').value = secretPart.toUpperCase().replace(/\s+/g, '');
                 document.getElementById('qr-submit-form').submit();
-            } catch (err) { 
-                console.error(err);
-                alert("Processing failed.\nCaptured Data:\n" + text); 
-            }
+            } catch (err) { alert("Processing failed."); }
         } else {
-            alert("Invalid 2FA Configuration Layout. Text detected:\n" + text);
+            alert("Invalid 2FA layout format.");
         }
     }
 
-    // 3. REMOVAL INTERACTIONS
     function triggerTokenDeletion(id, serviceName) {
-        if (confirm("Are you sure you want to permanently delete the 2FA key for '" + serviceName + "'? You will lose access to generating codes for this entry.")) {
+        if (confirm("Permanently delete '" + serviceName + "'?")) {
             document.getElementById('delete-target-id').value = id;
             document.getElementById('delete-token-form').submit();
         }
     }
 
-    // LIVE RUNTIME TOTP MATRIX LOGIC
     function calculateLiveWebTokens() {
         document.querySelectorAll('[id^="code-"]').forEach(el => {
             const seed = el.getAttribute('data-seed');

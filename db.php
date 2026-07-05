@@ -9,7 +9,7 @@ if (session_status() === PHP_SESSION_NONE) {
 $host = "localhost";
 $user = "root"; 
 $pass = "";     
-$dbname = "daboreypass";
+$dbname = "if0_42283348_daboreypass";
 
 mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 
