@@ -37,7 +37,6 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['a
     }
     
     $tokens = fetchUserTokens($conn, $_SESSION['user_id'], $encryption_key);
-    
     log_system_event($conn, $_SESSION['username'], '2FA_UNIVERSAL_JSON_EXPORTED');
     
     $exportData = [];
@@ -52,7 +51,6 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['a
     
     header('Content-Type: application/json; charset=utf-8');
     header('Content-Disposition: attachment; filename="Vault_Backup_' . date('Ymd_His') . '.json"');
-    
     echo json_encode($exportData, JSON_PRETTY_PRINT);
     exit;
 }
@@ -69,8 +67,6 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['a
         
         if (is_array($payload)) {
             $items = $payload;
-            
-            // Auto-unwrap if nested inside a root property dictionary node (like entries, items, or data)
             if (!isset($payload[0])) { 
                 foreach ($payload as $key => $value) {
                     if (is_array($value)) {
@@ -85,41 +81,25 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['a
             
             foreach ($items as $item) {
                 if (!is_array($item)) continue;
-
-                // Force all array keys to lowercase to eliminate case-sensitivity mismatches
                 $cleanItem = array_change_key_case($item, CASE_LOWER);
-
-                // Extract Account Name / Issuer
                 $name = trim($cleanItem['name'] ?? $cleanItem['label'] ?? $cleanItem['issuer'] ?? $cleanItem['originalname'] ?? $cleanItem['issuername'] ?? 'Imported Account');
                 
-                // The 5-Stage Condition Fallback System
                 $seed = '';
-
-                // CONDITION 1: Standard Universal/Aegis flat format
                 if (isset($cleanItem['secret']) && !empty($cleanItem['secret'])) {
                     $seed = trim($cleanItem['secret']);
-                } 
-                // CONDITION 2: Alternative terminology variant
-                elseif (isset($cleanItem['seed']) && !empty($cleanItem['seed'])) {
+                } elseif (isset($cleanItem['seed']) && !empty($cleanItem['seed'])) {
                     $seed = trim($cleanItem['seed']);
                 } elseif (isset($cleanItem['key']) && !empty($cleanItem['key'])) {
                     $seed = trim($cleanItem['key']);
-                } 
-                // CONDITION 3: Hardware Key / LastPass format
-                elseif (isset($cleanItem['secretname']) && !empty($cleanItem['secretname'])) {
+                } elseif (isset($cleanItem['secretname']) && !empty($cleanItem['secretname'])) {
                     $seed = trim($cleanItem['secretname']);
-                } 
-                // CONDITION 4: Deep Nested Object format (2FAS / Bitwarden layout style)
-                elseif (isset($cleanItem['totp']['secret']) && !empty($cleanItem['totp']['secret'])) {
+                } elseif (isset($cleanItem['totp']['secret']) && !empty($cleanItem['totp']['secret'])) {
                     $seed = trim($cleanItem['totp']['secret']);
-                } 
-                // CONDITION 5: Raw URL scheme validation extraction fallback (otpauth://)
-                elseif (isset($cleanItem['uri']) && !empty($cleanItem['uri'])) {
+                } elseif (isset($cleanItem['uri']) && !empty($cleanItem['uri'])) {
                     parse_str(parse_url($cleanItem['uri'], PHP_URL_QUERY), $queryOpts);
                     $seed = $queryOpts['secret'] ?? '';
                 }
 
-                // Clean the extracted seed (force uppercase, strip bad characters)
                 $seed = strtoupper(preg_replace('/[^A-Za-z2-7]/', '', $seed));
                 
                 if (!empty($name) && !empty($seed)) {
@@ -133,14 +113,14 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['a
             
             if ($success_count > 0) {
                 log_system_event($conn, $_SESSION['username'], '2FA_UNIVERSAL_JSON_IMPORTED_COUNT_' . $success_count);
-                $message = "Migration Complete! Successfully loaded " . $success_count . " profiles into your vault.";
+                $message = "Migration Complete! Successfully loaded " . $success_count . " profiles.";
                 $status = "success";
             } else {
-                $message = "Could not parse any valid name/secret data pairs out of this file structure.";
+                $message = "Could not parse data pairs out of this file structure.";
                 $status = "error";
             }
         } else {
-            $message = "Invalid JSON data framework structure syntax.";
+            $message = "Invalid JSON structure framework syntax.";
             $status = "error";
         }
     } else {
@@ -156,17 +136,16 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['a
     }
 
     $token_id = intval($_POST['token_id']);
-
     if ($token_id > 0) {
         $stmt = $conn->prepare("DELETE FROM two_factor_tokens WHERE id = ? AND user_id = ?");
         $stmt->bind_param("ii", $token_id, $_SESSION['user_id']);
         
         if ($stmt->execute()) {
             log_system_event($conn, $_SESSION['username'], '2FA_TOKEN_DELETED_ID_' . $token_id);
-            $message = "2FA entry detached and purged successfully.";
+            $message = "2FA entry purged successfully.";
             $status = "success";
         } else {
-            $message = "Failed to purge structural data record.";
+            $message = "Failed to purge database entry.";
             $status = "error";
         }
         $stmt->close();
@@ -198,7 +177,12 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['a
     }
 }
 
-$two_factor_tokens = fetchUserTokens($conn, $_SESSION['user_id'], $encryption_key);
+// Fetch all elements once (filtering handles inside DOM dynamically via Javascript)
+$stmt = $conn->prepare("SELECT id, service_name, AES_DECRYPT(secret_seed, ?) AS decrypted_seed FROM two_factor_tokens WHERE user_id = ?");
+$stmt->bind_param("si", $encryption_key, $_SESSION['user_id']);
+$stmt->execute();
+$two_factor_tokens = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+$stmt->close();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -219,7 +203,15 @@ $two_factor_tokens = fetchUserTokens($conn, $_SESSION['user_id'], $encryption_ke
         label { font-size: 13px; color: #94a3b8; display: block; margin-top: 10px; }
         input { width: 100%; padding: 10px; margin: 6px 0 14px 0; box-sizing: border-box; border: 1px solid #475569; border-radius: 4px; background: #0f172a; color: #fff; }
         
-        .dropzone-area { border: 2px dashed #475569; background: #0f172a; border-radius: 6px; padding: 20px; text-align: center; cursor: pointer; color: #94a3b8; transition: border-color 0.2s; position: relative; }
+        /* Modernized Active Live Search Interface Bar */
+        .search-container { position: relative; margin-bottom: 20px; }
+        .search-input { width: 100%; padding: 12px 14px; box-sizing: border-box; border: 1px solid #0284c7; border-radius: 6px; background: #0f172a; color: #fff; font-size: 14px; margin: 0; }
+        .search-input:focus { outline: none; border-color: #38bdf8; box-shadow: 0 0 8px rgba(56, 189, 248, 0.2); }
+        
+        /* Highlighting syntax style color rules */
+        mark.highlight { background: #eab308; color: #0f172a; padding: 1px 3px; border-radius: 2px; font-weight: bold; }
+
+        .dropzone-area { border: 2px dashed #475569; background: #0f172a; border-radius: 6px; padding: 20px; text-align: center; cursor: pointer; color: #94a3b8; }
         .dropzone-area:hover, .dropzone-area.dragover { border-color: #38bdf8; color: #f8fafc; }
         .dropzone-area input { display: none; }
 
@@ -240,7 +232,7 @@ $two_factor_tokens = fetchUserTokens($conn, $_SESSION['user_id'], $encryption_ke
         .error { color: #f87171; background: rgba(248,113,113,0.1); border: 1px solid rgba(248,113,113,0.2); padding: 10px; font-size: 14px; border-radius: 4px; margin-bottom: 15px; }
         .success { color: #34d399; background: rgba(52,211,153,0.1); border: 1px solid rgba(52,211,153,0.2); padding: 10px; font-size: 14px; border-radius: 4px; margin-bottom: 15px; }
         
-        .token-row { background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 15px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .token-row { background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 15px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; transition: all 0.15s ease; }
         .token-label { font-size: 12px; color: #94a3b8; text-transform: uppercase; font-weight: bold; }
         .token-code { font-size: 32px; color: #38bdf8; font-family: monospace; font-weight: bold; letter-spacing: 2px; margin-top: 4px; }
         
@@ -253,6 +245,8 @@ $two_factor_tokens = fetchUserTokens($conn, $_SESSION['user_id'], $encryption_ke
         .progress-wrapper { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; background: rgba(56, 189, 248, 0.05); padding: 10px; border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.1); font-size: 13px;}
         .bar-container { background: #334155; height: 6px; width: 120px; border-radius: 3px; overflow: hidden; }
         .bar-fill { background: #38bdf8; height: 100%; width: 100%; transition: width 1s linear; }
+        
+        #no-results-message { text-align: center; color: #64748b; font-size: 14px; padding: 30px 0; display: none; }
     </style>
     <script src="https://unpkg.com/html5-qrcode"></script>
     <script src="https://cdn.jsdelivr.net/npm/otpauth@9.3.6/dist/otpauth.umd.min.js"></script>
@@ -302,7 +296,7 @@ $two_factor_tokens = fetchUserTokens($conn, $_SESSION['user_id'], $encryption_ke
                 <div class="box">
                     <h3>Option 2: Upload QR Screenshot</h3>
                     <div class="dropzone-area" id="drop-zone" onclick="document.getElementById('qr-file-input').click()">
-                        <div style="font-size: 24px; margin-bottom: 5px;">📁</div>
+                        <div style="font-size: 24px; margin-bottom: 5px;">🖼️</div>
                         <span>Click or drop your 2FA QR code image here</span>
                         <input type="file" id="qr-file-input" accept="image/*">
                     </div>
@@ -341,19 +335,23 @@ $two_factor_tokens = fetchUserTokens($conn, $_SESSION['user_id'], $encryption_ke
             <div class="box">
                 <h3>Your Authenticator Codes</h3>
                 
+                <div class="search-container">
+                    <input type="text" id="live-search-bar" class="search-input" placeholder="Type to search & filter tokens instantly..." autocomplete="off">
+                </div>
+
                 <div class="progress-wrapper">
                     <span id="timer-label">Awaiting clock sync...</span>
                     <div class="bar-container"><div class="bar-fill" id="timer-bar"></div></div>
                 </div>
 
                 <div id="token-container">
-                    <?php if (empty($two_factor_tokens)): ?>
-                        <p style="text-align: center; color: #64748b; font-size: 14px; padding: 20px 0;">No active codes. Register an account using any option on the left.</p>
-                    <?php else: ?>
+                    <p id="no-results-message">No matching active codes found.</p>
+                    
+                    <?php if (!empty($two_factor_tokens)): ?>
                         <?php foreach ($two_factor_tokens as $token): ?>
-                            <div class="token-row">
+                            <div class="token-row" data-searchable-name="<?php echo htmlspecialchars(strtolower($token['service_name'])); ?>">
                                 <div>
-                                    <div class="token-label"><?php echo htmlspecialchars($token['service_name']); ?></div>
+                                    <div class="token-label" data-raw-text="<?php echo htmlspecialchars($token['service_name']); ?>"><?php echo htmlspecialchars($token['service_name']); ?></div>
                                     <div class="token-code" id="code-<?php echo $token['id']; ?>" data-seed="<?php echo htmlspecialchars($token['decrypted_seed']); ?>">000 000</div>
                                 </div>
                                 <div class="action-tray">
@@ -362,6 +360,8 @@ $two_factor_tokens = fetchUserTokens($conn, $_SESSION['user_id'], $encryption_ke
                                 </div>
                             </div>
                         <?php endforeach; ?>
+                    <?php else: ?>
+                        <p id="empty-db-fallback" style="text-align: center; color: #64748b; font-size: 14px; padding: 20px 0;">No profiles found inside your vault.</p>
                     <?php endif; ?>
                 </div>
 
@@ -394,10 +394,53 @@ $two_factor_tokens = fetchUserTokens($conn, $_SESSION['user_id'], $encryption_ke
 
     const fileInput = document.getElementById('qr-file-input');
     const dropZone = document.getElementById('drop-zone');
+    const searchBar = document.getElementById('live-search-bar');
 
     function initScannerEngines() {
         fileEngineInstance = new Html5Qrcode("drop-zone");
         startSyncClock();
+        
+        // Connect Live Filter Search Input Event Listener
+        if (searchBar) {
+            searchBar.addEventListener('input', runLiveTokenSearchFilter);
+        }
+    }
+
+    // REAL TIME SEARCH, VISIBILITY TOGGLING, AND HIGHLIGHTING ENGINE
+    function runLiveTokenSearchFilter() {
+        const query = searchBar.value.trim().toLowerCase();
+        const rows = document.querySelectorAll('.token-row');
+        const noResultsMsg = document.getElementById('no-results-message');
+        let visibleCount = 0;
+
+        rows.forEach(row => {
+            const labelNode = row.querySelector('.token-label');
+            const originalText = labelNode.getAttribute('data-raw-text');
+            
+            if (!query) {
+                // If query is empty, reset display and restore text
+                row.style.display = 'flex';
+                labelNode.textContent = originalText;
+                visibleCount++;
+            } else {
+                if (originalText.toLowerCase().includes(query)) {
+                    row.style.display = 'flex';
+                    visibleCount++;
+                    
+                    // Generate regular expression match layout safely
+                    const regex = new RegExp(`(${query.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')})`, 'gi');
+                    labelNode.innerHTML = originalText.replace(regex, '<mark class="highlight">$1</mark>');
+                } else {
+                    // Match failed: hide component node seamlessly
+                    row.style.display = 'none';
+                }
+            }
+        });
+
+        // Toggle fallback "No Results Found" node notice label block
+        if (noResultsMsg) {
+            noResultsMsg.style.display = (rows.length > 0 && visibleCount === 0) ? 'block' : 'none';
+        }
     }
 
     function startCameraEngine(type) {
